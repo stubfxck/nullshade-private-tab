@@ -109,6 +109,7 @@ function breadcrumb(text) {
     async function purgeTabHistory(tab) {
       const entry = tabHistory.get(tab);
       if (!entry) {
+        breadcrumb("purgeTabHistory: no tracked entry for this tab (not attached?)");
         return;
       }
       tabHistory.delete(tab);
@@ -117,7 +118,9 @@ function breadcrumb(text) {
       } catch (ex) {
         // вкладка уже закрыта/browser уничтожен — не страшно
       }
-      if (entry.urls.size === 0) {
+      const urls = [...entry.urls];
+      breadcrumb("purgeTabHistory: tracked " + urls.length + " url(s): " + JSON.stringify(urls));
+      if (urls.length === 0) {
         return;
       }
       try {
@@ -125,7 +128,8 @@ function breadcrumb(text) {
         // и связанные записи истории ввода (откуда берутся подсказки поиска
         // по этому адресу в адресной строке), т.к. они хранятся по ссылке
         // на конкретную запись в moz_places.
-        await PlacesUtils.history.remove([...entry.urls]);
+        await PlacesUtils.history.remove(urls);
+        breadcrumb("purgeTabHistory: PlacesUtils.history.remove() completed OK");
       } catch (ex) {
         breadcrumb("purgeTabHistory failed: " + ex);
       }
@@ -196,6 +200,7 @@ function breadcrumb(text) {
 
     function cleanupContextForTab(tab) {
       const userContextId = tab.userContextId;
+      breadcrumb("TabClose fired, userContextId=" + userContextId + ", tracked=" + shadowContexts.has(userContextId));
       if (!userContextId || !shadowContexts.has(userContextId)) {
         return;
       }
