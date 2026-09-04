@@ -63,10 +63,17 @@ function breadcrumb(text) {
     );
     await breadcrumb("imports OK (ContextualIdentityService, startupFinished)");
 
-    const IDENTITY_NAME = "Приватная вкладка";
+    // Локализация: если язык интерфейса браузера русский — RU-строки,
+    // иначе английский. Комментарии/breadcrumb-лог намеренно не переводим —
+    // это для нас, не для пользователя.
+    const isRussianUI = Services.locale.appLocaleAsBCP47.startsWith("ru");
+    const t = (ru, en) => (isRussianUI ? ru : en);
+
+    const IDENTITY_NAME = t("Приватная вкладка", "Private Tab");
     const IDENTITY_ICON = "fingerprint";
     const IDENTITY_COLOR = "purple";
     const TAB_ICON = "chrome://global/skin/icons/indicator-private-browsing.svg";
+    const TOAST_TEXT = t("Открыта новая приватная вкладка", "New private tab opened");
 
     // userContextId наших вкладок — чтобы не спутать с обычными контейнерами
     // пользователя (Personal/Work/Banking и т.д.) при уборке.
@@ -147,7 +154,7 @@ function breadcrumb(text) {
       try {
         const doc = window.top.document;
         const toast = doc.createElement("div");
-        toast.textContent = "Открыта новая приватная вкладка";
+        toast.textContent = TOAST_TEXT;
         toast.style.cssText = [
           "position:fixed",
           "bottom:16px",

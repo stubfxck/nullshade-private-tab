@@ -1,7 +1,7 @@
 {
   "id": "private-tab",
   "name": "Nullshade Private Tab",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Private tabs instead of private windows, one throwaway container per tab.",
   "homepage": "https://github.com/stubfxck/nullshade-private-tab"
 }
