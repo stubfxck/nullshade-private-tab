@@ -14,6 +14,26 @@
 const LOG_TAG = "[Nullshade private-tab]";
 console.log(LOG_TAG, "script loaded, parsing top-level code");
 
+// Дублируем ключевые события в файл — консоль браузера не всегда доступна
+// для диагностики (нет интерактивного ввода, ограничения на копирование
+// и т.д.), а лог-файл можно прочитать откуда угодно.
+const BREADCRUMB_PATH = PathUtils.join(PathUtils.profileDir, "nullshade-private-tab.log");
+async function breadcrumb(text) {
+  try {
+    const line = new Date().toISOString() + " " + text + "\n";
+    let existing = "";
+    try {
+      existing = await IOUtils.readUTF8(BREADCRUMB_PATH);
+    } catch (ex) {
+      // файла ещё нет — это нормально при первом запуске
+    }
+    await IOUtils.writeUTF8(BREADCRUMB_PATH, existing + line);
+  } catch (ex) {
+    // если и запись в файл не удалась — писать больше некуда
+  }
+}
+breadcrumb("script loaded, parsing top-level code");
+
 const { ContextualIdentityService } = ChromeUtils.importESModule(
   "resource://gre/modules/ContextualIdentityService.sys.mjs"
 );
@@ -95,14 +115,19 @@ async function waitForGBrowser(timeoutMs = 10000) {
 
 async function init() {
   try {
+    await breadcrumb("init: waiting for startupFinished()");
     await startupFinished();
+    await breadcrumb("init: startupFinished() resolved, waiting for gBrowser");
     await waitForGBrowser();
+    await breadcrumb("init: gBrowser ready");
     purgeOrphanedContexts();
 
     const originalOpenBrowserWindow = window.OpenBrowserWindow;
     window.OpenBrowserWindow = function (options) {
+      breadcrumb("OpenBrowserWindow called, options=" + JSON.stringify(options));
       console.log(LOG_TAG, "OpenBrowserWindow called with options:", options);
       if (options && options.private) {
+        breadcrumb("intercepted -> opening private tab instead of a window");
         console.log(LOG_TAG, "intercepted -> opening private tab instead of a window");
         return openPrivateTab();
       }
@@ -113,8 +138,10 @@ async function init() {
       cleanupContextForTab(event.target);
     });
 
+    await breadcrumb("init complete — OpenBrowserWindow patched, ready");
     console.log(LOG_TAG, "init complete — OpenBrowserWindow patched, ready");
   } catch (ex) {
+    await breadcrumb("init FAILED: " + ex + (ex?.stack ? "\n" + ex.stack : ""));
     console.error(LOG_TAG, "init FAILED:", ex);
   }
 }
