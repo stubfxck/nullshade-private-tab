@@ -79,6 +79,18 @@ function breadcrumb(text) {
     // пользователя (Personal/Work/Banking и т.д.) при уборке.
     const shadowContexts = new Set();
 
+    // Какая из наших вкладок была активна последней и когда — нужно, чтобы
+    // правильно приписать page-visited событие, если оно прилетело чуть позже
+    // (асинхронно), чем сама вкладка перестала быть выбранной (см. ниже).
+    // ВАЖНО ограничивать это окном по времени (ATTRIBUTION_GRACE_MS), а не
+    // держать привязку бессрочно, пока вкладка не закрыта — иначе, если
+    // пользователь переключится в обычную вкладку и долго там сидит, вся её
+    // история будет ошибочно приписываться ещё не закрытой приватной вкладке
+    // и удалится вместе с ней.
+    let lastFocusedPrivateTab = null;
+    let lastFocusedPrivateTabTime = 0;
+    const ATTRIBUTION_GRACE_MS = 2500;
+
     // ВАЖНО: контейнеры Firefox изолируют куки/localStorage/IndexedDB/кэш,
     // но НЕ изолируют историю посещений и историю поиска в адресной строке —
     // это отдельная, не привязанная к userContextId база (Places/moz_places,
@@ -87,7 +99,29 @@ function breadcrumb(text) {
     // чистить руками. Настоящий per-tab Private Browsing (usePrivateBrowsing)
     // жёстко привязан к ОКНУ на уровне chromeFlags при его создании и не
     // выставляется на отдельную вкладку без патча движка — см. README.
-    const tabHistory = new Map(); // tab -> Set<url>
+    //
+    // РАСКРЫТЫЙ БАГОМ НЮАНС: onLocationChange (webProgress) ловит только
+    // навигации САМОЙ вкладки. Но когда текст вводится прямо в адресную
+    // строку (urlbar) и подтверждается как поисковый запрос, Firefox пишет
+    // "typed"-visit (moz_historyvisits.visit_type=2, from_visit=0) НАПРЯМУЮ
+    // в Places из кода самого urlbar — это происходит МИМО webProgress вкладки
+    // и с URL, который может отличаться от того, что потом реально загрузится
+    // (например, DuckDuckGo сам переписывает свой URL через history.replaceState,
+    // убирая параметры atb/ia — получается ещё один, третий вариант адреса).
+    // Проверено вживую: PlacesUtils.history.remove() отработал успешно для
+    // двух отслеженных вариантов адреса, а третий (тот самый typed-visit без
+    // atb/ia) остался в базе, потому что onLocationChange его вообще не видел.
+    //
+    // Починено подпиской на PlacesObservers "page-visited" — это единая точка,
+    // через которую ЛЮБАЯ запись попадает в moz_places, независимо от того,
+    // какой именно внутренний путь её туда положил (webProgress вкладки,
+    // urlbar напрямую, replaceState со страницы). Слушатель глобальный
+    // (на всё окно), поэтому фильтруется по gBrowser.selectedTab — событие
+    // учитывается, только если прямо сейчас активна одна из наших приватных
+    // вкладок. Источник подтверждён вживую: тем же способом (PlacesObservers.
+    // addListener(["page-visited"], ...)) пользуется сам browser/components/
+    // urlbar/UrlbarUtils.sys.mjs в исходниках Firefox.
+    const tabHistory = new Map(); // tab -> {listener, urls: Set<url>}
 
     function trackTabHistory(tab) {
       const urls = new Set();
@@ -113,18 +147,67 @@ function breadcrumb(text) {
       tabHistory.set(tab, { listener, urls });
     }
 
+    // Единый на всё окно слушатель Places — ловит в том числе visit'ы,
+    // записанные urlbar'ом напрямую (см. комментарий выше). Живёт всю сессию,
+    // отдельно снимать его не нужно (как и патч OpenBrowserWindow).
+    const globalVisitListener = (events) => {
+      let targetTab = null;
+      try {
+        const selected = gBrowser.selectedTab;
+        if (selected && shadowContexts.has(selected.userContextId)) {
+          targetTab = selected;
+        } else if (
+          lastFocusedPrivateTab &&
+          tabHistory.has(lastFocusedPrivateTab) &&
+          Date.now() - lastFocusedPrivateTabTime < ATTRIBUTION_GRACE_MS
+        ) {
+          // Приватная вкладка уже не в фокусе (например, только что закрылась),
+          // но событие могло быть инициировано ещё до этого — короткое окно
+          // прощения по времени, не бессрочная привязка.
+          targetTab = lastFocusedPrivateTab;
+        }
+      } catch (ex) {
+        return;
+      }
+      if (!targetTab) {
+        return;
+      }
+      const entry = tabHistory.get(targetTab);
+      if (!entry) {
+        return;
+      }
+      for (const event of events) {
+        if (event.type === "page-visited" && event.url) {
+          entry.urls.add(event.url);
+          breadcrumb("global page-visited captured for active private tab: " + event.url);
+        }
+      }
+    };
+    try {
+      PlacesObservers.addListener(["page-visited"], globalVisitListener);
+    } catch (ex) {
+      breadcrumb("failed to attach global PlacesObservers listener: " + ex);
+    }
+
     async function purgeTabHistory(tab) {
       const entry = tabHistory.get(tab);
       if (!entry) {
         breadcrumb("purgeTabHistory: no tracked entry for this tab (not attached?)");
         return;
       }
-      tabHistory.delete(tab);
       try {
         tab.linkedBrowser.removeProgressListener(entry.listener);
       } catch (ex) {
         // вкладка уже закрыта/browser уничтожен — не страшно
       }
+      // Небольшая пауза перед финальным сбором: page-visited может прилететь
+      // с небольшой асинхронной задержкой относительно самого действия
+      // (например, urlbar успевает записать typed-visit чуть позже TabClose,
+      // если пользователь закрыл вкладку сразу после ввода). Запись в
+      // tabHistory НАРОЧНО не удаляется до конца этой паузы — globalVisitListener
+      // должен иметь возможность найти entry и дописать в неё запоздавший url.
+      await new Promise((resolve) => setTimeout(resolve, ATTRIBUTION_GRACE_MS));
+      tabHistory.delete(tab);
       const urls = [...entry.urls];
       breadcrumb("purgeTabHistory: tracked " + urls.length + " url(s): " + JSON.stringify(urls));
       if (urls.length === 0) {
@@ -207,14 +290,14 @@ function breadcrumb(text) {
       return tab;
     }
 
-    function cleanupContextForTab(tab) {
+    async function cleanupContextForTab(tab) {
       const userContextId = tab.userContextId;
       breadcrumb("TabClose fired, userContextId=" + userContextId + ", tracked=" + shadowContexts.has(userContextId));
       if (!userContextId || !shadowContexts.has(userContextId)) {
         return;
       }
       shadowContexts.delete(userContextId);
-      purgeTabHistory(tab);
+      await purgeTabHistory(tab);
       try {
         // remove() сам вызывает Services.clearData.deleteDataFromOriginAttributesPattern
         // для этого userContextId — отдельно чистить куки/storage не нужно.
@@ -276,6 +359,17 @@ function breadcrumb(text) {
 
     gBrowser.tabContainer.addEventListener("TabClose", (event) => {
       cleanupContextForTab(event.target);
+    });
+
+    // Обновляет lastFocusedPrivateTab, когда одна из наших вкладок становится
+    // активной — используется globalVisitListener'ом, чтобы правильно
+    // приписать чуть запоздавшее page-visited событие (см. комментарий выше).
+    gBrowser.tabContainer.addEventListener("TabSelect", (event) => {
+      const tab = event.target;
+      if (tab && shadowContexts.has(tab.userContextId)) {
+        lastFocusedPrivateTab = tab;
+        lastFocusedPrivateTabTime = Date.now();
+      }
     });
 
     await breadcrumb("init complete — OpenBrowserWindow patched, ready");

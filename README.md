@@ -64,7 +64,12 @@ between tabs, no leftover data.
 - History cleanup is best-effort: only URLs this specific tab actually
   navigated to get removed. If the exact same URL was also open in a
   regular tab during the same session, it stays in history (removing it
-  would affect your regular browsing, not just the private tab).
+  would affect your regular browsing, not just the private tab). This
+  covers both real page navigations and text typed directly into the
+  address bar (Firefox records that as a separate "typed" history entry,
+  independent of the page load) — the tab keeps listening for a couple
+  seconds after it closes to catch anything still in flight at that
+  moment.
 
 ## Install
 
