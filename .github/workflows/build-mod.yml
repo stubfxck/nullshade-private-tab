@@ -95,7 +95,7 @@ jobs:
                 title       = "Nullshade Private Tab ${{ steps.mod.outputs.version }}"
                 url         = "${{ steps.release.outputs.url }}"
                 description = "Private tabs, not private windows — one throwaway container per tab. New release is up."
-                color       = 0x8A5CF6
+                color       = 0x403A68
                 thumbnail   = @{ url = $avatar }
                 fields      = @(
                   @{ name = "Version"; value = "**${{ steps.mod.outputs.version }}**"; inline = $true }
