@@ -86,20 +86,25 @@ jobs:
             Write-Host "DISCORD_WEBHOOK_URL secret not set, skipping."
             exit 0
           }
+          $avatar = "https://avatars.githubusercontent.com/u/140010018?v=4"
           $body = @{
-            username = "Nullshade Private Tab"
-            embeds   = @(
+            username   = "Nullshade Studio"
+            avatar_url = $avatar
+            embeds     = @(
               @{
-                title       = "Nullshade Private Tab ${{ steps.mod.outputs.version }}"
+                title       = "🕶️ Nullshade Private Tab ${{ steps.mod.outputs.version }}"
                 url         = "${{ steps.release.outputs.url }}"
-                description = "New mod release published."
+                description = "Private tabs, not private windows — one throwaway container per tab. New release is up."
                 color       = 0x8A5CF6
+                thumbnail   = @{ url = $avatar }
                 fields      = @(
-                  @{ name = "Version"; value = "${{ steps.mod.outputs.version }}"; inline = $true }
-                  @{ name = "Download"; value = "${{ steps.release.outputs.url }}" }
+                  @{ name = "🔖 Version"; value = "``${{ steps.mod.outputs.version }}``"; inline = $true }
+                  @{ name = "⬇️ Download"; value = "**[NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip](${{ steps.release.outputs.url }})**" }
+                  @{ name = "📖 Install steps"; value = "[README](https://github.com/stubfxck/nullshade-private-tab#install)" }
                 )
+                footer      = @{ text = "Nullshade Studio · automated build"; icon_url = $avatar }
                 timestamp   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
               }
             )
-          } | ConvertTo-Json -Depth 5
+          } | ConvertTo-Json -Depth 6
           Invoke-RestMethod -Uri $env:DISCORD_WEBHOOK_URL -Method Post -ContentType "application/json" -Body $body
