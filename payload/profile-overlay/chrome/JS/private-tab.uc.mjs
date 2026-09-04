@@ -16,31 +16,35 @@
 // попадает в лог-файл Data\profile\nullshade-private-tab.log, а не тонет
 // молча. Консоль браузера не всегда доступна для диагностики, файл — всегда.
 
-const BREADCRUMB_PATH_FALLBACK =
-  (typeof PathUtils !== "undefined" && PathUtils.profileDir)
-    ? PathUtils.profileDir + "/nullshade-private-tab.log"
-    : null;
-
-async function breadcrumb(text) {
-  const line = new Date().toISOString() + " " + text + "\n";
+// Пишем лог через ClassicXPCOM (Cc/Ci), не через IOUtils/PathUtils — те
+// иногда недоступны как голые глобалы в module-scope в зависимости от того,
+// как именно fx-autoconfig прокидывает window. Cc/Ci — самый базовый,
+// гарантированно доступный слой privileged JS, старше и надёжнее всего
+// остального здесь.
+function breadcrumb(text) {
+  const line = new Date().toISOString() + " " + text + "\r\n";
   try {
     console.log("[Nullshade private-tab]", text);
   } catch (ex) {
     // консоль недоступна — не страшно, ниже есть файл
   }
-  if (!BREADCRUMB_PATH_FALLBACK) {
-    return;
-  }
   try {
-    let existing = "";
-    try {
-      existing = await IOUtils.readUTF8(BREADCRUMB_PATH_FALLBACK);
-    } catch (ex) {
-      // файла ещё нет — нормально при первом запуске
-    }
-    await IOUtils.writeUTF8(BREADCRUMB_PATH_FALLBACK, existing + line);
+    const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
+    const file = profileDir.clone();
+    file.append("nullshade-private-tab.log");
+    const foStream = Cc["@mozilla.org/network/file-output-stream;1"].createInstance(
+      Ci.nsIFileOutputStream
+    );
+    // write | create | append, права 0644
+    foStream.init(file, 0x02 | 0x08 | 0x10, 0o644, 0);
+    const converter = Cc["@mozilla.org/intl/converter-output-stream;1"].createInstance(
+      Ci.nsIConverterOutputStream
+    );
+    converter.init(foStream, "UTF-8");
+    converter.writeString(line);
+    converter.close();
   } catch (ex) {
-    // и запись в файл не удалась — писать больше некуда
+    // и классический способ не сработал — писать больше некуда
   }
 }
 
