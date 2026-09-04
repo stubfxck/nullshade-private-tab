@@ -140,7 +140,9 @@ function breadcrumb(text) {
     // локализацию Zen). Плюс с ним всё равно ещё всплывает штатный тост
     // Zen "Открыта новая фоновая вкладка" (он видит вкладку в фоне в момент
     // TabOpen, до нашего gBrowser.selectedTab — событие синхронное, раньше
-    // не вклиниться без патча). Наш тост просто уточняет рядом.
+    // не вклиниться без патча). Наш тост просто уточняет рядом — в НИЖНЕМ
+    // правом углу, а не в верхнем, где рендерится штатный тост Zen, иначе
+    // они налипают друг на друга.
     function showPrivateTabToast() {
       try {
         const doc = window.top.document;
@@ -148,7 +150,7 @@ function breadcrumb(text) {
         toast.textContent = "Открыта новая приватная вкладка";
         toast.style.cssText = [
           "position:fixed",
-          "top:16px",
+          "bottom:16px",
           "right:16px",
           "z-index:2147483647",
           "background:#403A68",
