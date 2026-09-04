@@ -92,17 +92,17 @@ jobs:
             avatar_url = $avatar
             embeds     = @(
               @{
-                title       = "🕶️ Nullshade Private Tab ${{ steps.mod.outputs.version }}"
+                title       = "Nullshade Private Tab ${{ steps.mod.outputs.version }}"
                 url         = "${{ steps.release.outputs.url }}"
                 description = "Private tabs, not private windows — one throwaway container per tab. New release is up."
                 color       = 0x8A5CF6
                 thumbnail   = @{ url = $avatar }
                 fields      = @(
-                  @{ name = "🔖 Version"; value = "``${{ steps.mod.outputs.version }}``"; inline = $true }
-                  @{ name = "⬇️ Download"; value = "**[NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip](${{ steps.release.outputs.url }})**" }
-                  @{ name = "📖 Install steps"; value = "[README](https://github.com/stubfxck/nullshade-private-tab#install)" }
+                  @{ name = "Version"; value = "**${{ steps.mod.outputs.version }}**"; inline = $true }
+                  @{ name = "Download"; value = "[NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip](${{ steps.release.outputs.url }})" }
+                  @{ name = "Install steps"; value = "[README](https://github.com/stubfxck/nullshade-private-tab#install)" }
                 )
-                footer      = @{ text = "Nullshade Studio · automated build"; icon_url = $avatar }
+                footer      = @{ text = "Nullshade Studio — automated build"; icon_url = $avatar }
                 timestamp   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
               }
             )
