@@ -100,8 +100,8 @@ jobs:
                 image       = @{ url = "https://raw.githubusercontent.com/stubfxck/nullshade-private-tab/main/.github/assets/embed-spacer.webp" }
                 fields      = @(
                   @{ name = "Version"; value = "**${{ steps.mod.outputs.version }}**"; inline = $true }
-                  @{ name = "Download"; value = "[NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip](${{ steps.release.outputs.url }})"; inline = $false }
-                  @{ name = "Install steps"; value = "[README](https://github.com/stubfxck/nullshade-private-tab#install)"; inline = $false }
+                  @{ name = "Download"; value = "[NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip](${{ steps.release.outputs.url }})"; inline = $true }
+                  @{ name = "Install steps"; value = "[README](https://github.com/stubfxck/nullshade-private-tab#install)"; inline = $true }
                 )
                 footer      = @{ text = "Nullshade Studio — automated build"; icon_url = $avatar }
                 timestamp   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
