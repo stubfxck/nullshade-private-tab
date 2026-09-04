@@ -55,6 +55,9 @@ function breadcrumb(text) {
     const { ContextualIdentityService } = ChromeUtils.importESModule(
       "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs"
     );
+    const { PlacesUtils } = ChromeUtils.importESModule(
+      "resource://gre/modules/PlacesUtils.sys.mjs"
+    );
     const { startupFinished } = ChromeUtils.importESModule(
       "chrome://userchromejs/content/utils.sys.mjs"
     );
@@ -63,10 +66,110 @@ function breadcrumb(text) {
     const IDENTITY_NAME = "Приватная вкладка";
     const IDENTITY_ICON = "fingerprint";
     const IDENTITY_COLOR = "purple";
+    const TAB_ICON = "chrome://global/skin/icons/indicator-private-browsing.svg";
 
     // userContextId наших вкладок — чтобы не спутать с обычными контейнерами
     // пользователя (Personal/Work/Banking и т.д.) при уборке.
     const shadowContexts = new Set();
+
+    // ВАЖНО: контейнеры Firefox изолируют куки/localStorage/IndexedDB/кэш,
+    // но НЕ изолируют историю посещений и историю поиска в адресной строке —
+    // это отдельная, не привязанная к userContextId база (Places/moz_places,
+    // moz_inputhistory). Поэтому сам факт "своего контейнера" не делает
+    // вкладку приватной по-настоящему — историю и поисковые подсказки нужно
+    // чистить руками. Настоящий per-tab Private Browsing (usePrivateBrowsing)
+    // жёстко привязан к ОКНУ на уровне chromeFlags при его создании и не
+    // выставляется на отдельную вкладку без патча движка — см. README.
+    const tabHistory = new Map(); // tab -> Set<url>
+
+    function trackTabHistory(tab) {
+      const urls = new Set();
+      const listener = {
+        QueryInterface: ChromeUtils.generateQI([
+          "nsIWebProgressListener",
+          "nsISupportsWeakReference",
+        ]),
+        onLocationChange(webProgress, request, location) {
+          if (webProgress.isTopLevel && location && location.spec) {
+            urls.add(location.spec);
+          }
+        },
+      };
+      try {
+        tab.linkedBrowser.addProgressListener(
+          listener,
+          Ci.nsIWebProgress.NOTIFY_LOCATION
+        );
+      } catch (ex) {
+        breadcrumb("trackTabHistory failed to attach listener: " + ex);
+      }
+      tabHistory.set(tab, { listener, urls });
+    }
+
+    async function purgeTabHistory(tab) {
+      const entry = tabHistory.get(tab);
+      if (!entry) {
+        return;
+      }
+      tabHistory.delete(tab);
+      try {
+        tab.linkedBrowser.removeProgressListener(entry.listener);
+      } catch (ex) {
+        // вкладка уже закрыта/browser уничтожен — не страшно
+      }
+      if (entry.urls.size === 0) {
+        return;
+      }
+      try {
+        // Убирает эти адреса из истории посещений — вместе с ними чистятся
+        // и связанные записи истории ввода (откуда берутся подсказки поиска
+        // по этому адресу в адресной строке), т.к. они хранятся по ссылке
+        // на конкретную запись в moz_places.
+        await PlacesUtils.history.remove([...entry.urls]);
+      } catch (ex) {
+        breadcrumb("purgeTabHistory failed: " + ex);
+      }
+    }
+
+    // Свой минимальный тост — не через gZenUIManager.showToast(), потому что
+    // тот требует зарегистрированной Fluent-строки (пришлось бы трогать
+    // локализацию Zen). Плюс с ним всё равно ещё всплывает штатный тост
+    // Zen "Открыта новая фоновая вкладка" (он видит вкладку в фоне в момент
+    // TabOpen, до нашего gBrowser.selectedTab — событие синхронное, раньше
+    // не вклиниться без патча). Наш тост просто уточняет рядом.
+    function showPrivateTabToast() {
+      try {
+        const doc = window.top.document;
+        const toast = doc.createElement("div");
+        toast.textContent = "Открыта новая приватная вкладка";
+        toast.style.cssText = [
+          "position:fixed",
+          "top:16px",
+          "right:16px",
+          "z-index:2147483647",
+          "background:#403A68",
+          "color:#fff",
+          "padding:10px 16px",
+          "border-radius:8px",
+          "font-size:13px",
+          "font-family:system-ui,sans-serif",
+          "box-shadow:0 4px 16px rgba(0,0,0,.35)",
+          "pointer-events:none",
+          "opacity:0",
+          "transition:opacity .15s ease",
+        ].join(";");
+        doc.documentElement.appendChild(toast);
+        window.requestAnimationFrame(() => {
+          toast.style.opacity = "1";
+        });
+        window.setTimeout(() => {
+          toast.style.opacity = "0";
+          window.setTimeout(() => toast.remove(), 200);
+        }, 2500);
+      } catch (ex) {
+        breadcrumb("showPrivateTabToast failed: " + ex);
+      }
+    }
 
     function openPrivateTab() {
       const identity = ContextualIdentityService.create(
@@ -80,7 +183,14 @@ function breadcrumb(text) {
         userContextId: identity.userContextId,
         triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
       });
+      try {
+        gBrowser.setIcon(tab, TAB_ICON);
+      } catch (ex) {
+        // не критично, цветовая полоска контейнера всё равно видна
+      }
+      trackTabHistory(tab);
       gBrowser.selectedTab = tab;
+      showPrivateTabToast();
       return tab;
     }
 
@@ -90,6 +200,7 @@ function breadcrumb(text) {
         return;
       }
       shadowContexts.delete(userContextId);
+      purgeTabHistory(tab);
       try {
         // remove() сам вызывает Services.clearData.deleteDataFromOriginAttributesPattern
         // для этого userContextId — отдельно чистить куки/storage не нужно.

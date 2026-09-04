@@ -39,12 +39,32 @@ between tabs, no leftover data.
 - Each tab gets a brand-new contextual identity (`ContextualIdentityService.create`).
 - On tab close, the identity is removed — which wipes its cookies,
   localStorage, IndexedDB and cache as part of removal.
+- Every URL the tab visits is tracked and purged from browsing history
+  (and the address bar's search suggestions, which key off it) the moment
+  the tab closes — containers don't isolate history/input history from the
+  rest of your profile on their own, so this is done by hand.
 - A startup sweep removes any container left behind by a crash/force-quit
   before its tab could close normally.
 
-**Known limitation:** extensions are not disabled in these tabs (unlike a
-real private window, which disables them by default). If an extension you
-have installed tracks you across tabs, it can still see you here.
+**Known limitations (please read):**
+
+- **Not real Private Browsing.** Firefox's actual `usePrivateBrowsing` flag
+  is set per *window* at creation time (via chrome flags) and can't be
+  applied to a single tab in an otherwise normal window without patching
+  the engine — that's a hard technical wall, not something this mod chose
+  to skip. What you get instead is: no shared data between tabs (unlike
+  Waterfox's private tab, [BrowserWorks/waterfox#3956](https://github.com/BrowserWorks/waterfox/issues/3956)),
+  and cookies/storage/cache/history purged on close. Both approaches
+  ultimately rely on cleanup, not on the browser never writing the data in
+  the first place — the difference is Waterfox's cleanup misses whole
+  tabs' worth of shared state, this one's scoped correctly per tab.
+- Extensions are not disabled in these tabs (unlike a real private window,
+  which disables them by default). If an extension you have installed
+  tracks you across tabs, it can still see you here.
+- History cleanup is best-effort: only URLs this specific tab actually
+  navigated to get removed. If the exact same URL was also open in a
+  regular tab during the same session, it stays in history (removing it
+  would affect your regular browsing, not just the private tab).
 
 ## Install
 
