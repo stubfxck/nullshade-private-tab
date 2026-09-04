@@ -97,6 +97,7 @@ jobs:
                 description = "Private tabs, not private windows — one throwaway container per tab. New release is up."
                 color       = 0x403A68
                 thumbnail   = @{ url = $avatar }
+                image       = @{ url = "https://raw.githubusercontent.com/stubfxck/nullshade-private-tab/main/.github/assets/embed-spacer.webp" }
                 fields      = @(
                   @{ name = "Version"; value = "**${{ steps.mod.outputs.version }}**"; inline = $true }
                   @{ name = "Download"; value = "[NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip](${{ steps.release.outputs.url }})"; inline = $false }
