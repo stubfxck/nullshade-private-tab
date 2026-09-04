@@ -53,7 +53,7 @@ function breadcrumb(text) {
 
   try {
     const { ContextualIdentityService } = ChromeUtils.importESModule(
-      "resource://gre/modules/ContextualIdentityService.sys.mjs"
+      "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs"
     );
     const { startupFinished } = ChromeUtils.importESModule(
       "chrome://userchromejs/content/utils.sys.mjs"
