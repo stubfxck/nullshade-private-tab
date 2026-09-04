@@ -11,6 +11,9 @@
 //
 // Загружается через fx-autoconfig (см. builder/vendor/fx-autoconfig).
 
+const LOG_TAG = "[Nullshade private-tab]";
+console.log(LOG_TAG, "script loaded, parsing top-level code");
+
 const { ContextualIdentityService } = ChromeUtils.importESModule(
   "resource://gre/modules/ContextualIdentityService.sys.mjs"
 );
@@ -77,21 +80,43 @@ function purgeOrphanedContexts() {
   }
 }
 
-async function init() {
-  await startupFinished();
-  purgeOrphanedContexts();
-
-  const originalOpenBrowserWindow = window.OpenBrowserWindow;
-  window.OpenBrowserWindow = function (options) {
-    if (options && options.private) {
-      return openPrivateTab();
+// gBrowser иногда ещё не готов даже после startupFinished() (задокументированный
+// нюанс fx-autoconfig) — на всякий случай ждём его появления в этом window
+// отдельно, вместо того чтобы упасть на первой же строке, где он нужен.
+async function waitForGBrowser(timeoutMs = 10000) {
+  const start = Date.now();
+  while (typeof gBrowser === "undefined" || !gBrowser?.tabContainer) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("gBrowser не появился за " + timeoutMs + "мс");
     }
-    return originalOpenBrowserWindow.apply(this, arguments);
-  };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
 
-  gBrowser.tabContainer.addEventListener("TabClose", (event) => {
-    cleanupContextForTab(event.target);
-  });
+async function init() {
+  try {
+    await startupFinished();
+    await waitForGBrowser();
+    purgeOrphanedContexts();
+
+    const originalOpenBrowserWindow = window.OpenBrowserWindow;
+    window.OpenBrowserWindow = function (options) {
+      console.log(LOG_TAG, "OpenBrowserWindow called with options:", options);
+      if (options && options.private) {
+        console.log(LOG_TAG, "intercepted -> opening private tab instead of a window");
+        return openPrivateTab();
+      }
+      return originalOpenBrowserWindow.apply(this, arguments);
+    };
+
+    gBrowser.tabContainer.addEventListener("TabClose", (event) => {
+      cleanupContextForTab(event.target);
+    });
+
+    console.log(LOG_TAG, "init complete — OpenBrowserWindow patched, ready");
+  } catch (ex) {
+    console.error(LOG_TAG, "init FAILED:", ex);
+  }
 }
 
 init();
