@@ -1,0 +1,105 @@
+name: Build Nullshade Private Tab
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "mod.json"
+      - "payload/**"
+      - "scripts/**"
+      - ".github/workflows/build-mod.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from mod.json
+        id: mod
+        shell: pwsh
+        run: |
+          $mod = Get-Content mod.json -Raw | ConvertFrom-Json
+          echo "version=$($mod.version)" >> $env:GITHUB_OUTPUT
+          echo "id=$($mod.id)" >> $env:GITHUB_OUTPUT
+
+      - name: Build zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force output | Out-Null
+          $zip = "output\NullshadePrivateTab-${{ steps.mod.outputs.version }}.zip"
+          Compress-Archive -Path payload, scripts, mod.json, README.md, README_RU.md, LICENSE, licenses -DestinationPath $zip
+          echo "zip=$zip" >> $env:GITHUB_ENV
+
+      - name: Smoke test zip
+        shell: pwsh
+        run: |
+          $zip = $env:zip
+          if (-not (Test-Path $zip)) { throw "Zip not produced" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          # Compress-Archive может класть пути с '\' или '/' в зависимости от версии
+          # PowerShell/раннера — нормализуем перед сравнением, чтобы не зависеть от этого.
+          $entries = $archive.Entries.FullName -replace '\\','/'
+          foreach ($req in @(
+            "mod.json",
+            "scripts/install.ps1",
+            "payload/app-overlay/config.js",
+            "payload/app-overlay/defaults/pref/config-prefs.js",
+            "payload/app-overlay/defaults/pref/private-tab-mod.js",
+            "payload/profile-overlay/chrome/JS/private-tab.uc.mjs",
+            "payload/profile-overlay/chrome/utils/boot.sys.mjs"
+          )) {
+            if (-not ($entries -contains $req)) { throw "Zip missing $req" }
+          }
+          $archive.Dispose()
+          Write-Host "Smoke test OK"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NullshadePrivateTab-${{ steps.mod.outputs.version }}
+          path: output/*.zip
+          retention-days: 30
+
+      - name: Publish release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.mod.outputs.version }}
+          name: Nullshade Private Tab ${{ steps.mod.outputs.version }}
+          files: output/*.zip
+          body: |
+            Private tabs instead of private windows — see README for install steps.
+
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        shell: pwsh
+        run: |
+          if (-not $env:DISCORD_WEBHOOK_URL) {
+            Write-Host "DISCORD_WEBHOOK_URL secret not set, skipping."
+            exit 0
+          }
+          $body = @{
+            username = "Nullshade Private Tab"
+            embeds   = @(
+              @{
+                title       = "Nullshade Private Tab ${{ steps.mod.outputs.version }}"
+                url         = "${{ steps.release.outputs.url }}"
+                description = "New mod release published."
+                color       = 0x8A5CF6
+                fields      = @(
+                  @{ name = "Version"; value = "${{ steps.mod.outputs.version }}"; inline = $true }
+                  @{ name = "Download"; value = "${{ steps.release.outputs.url }}" }
+                )
+                timestamp   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              }
+            )
+          } | ConvertTo-Json -Depth 5
+          Invoke-RestMethod -Uri $env:DISCORD_WEBHOOK_URL -Method Post -ContentType "application/json" -Body $body

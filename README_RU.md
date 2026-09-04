@@ -1,0 +1,105 @@
+# Nullshade Private Tab
+
+*от [Nullshade Studio](https://github.com/stubfxck)*
+
+*[Read this in English](README.md)*
+
+**Приватная вкладка вместо приватного окна — для любого Firefox-based браузера.**
+Один клик открывает приватную вкладку прямо в текущем окне — без нового
+окна ОС, без общих куки между «приватными» вкладками, без патчей исходников браузера.
+
+Сделано под [Nullshade Portable](https://github.com/stubfxck/nullshade-portable)
+(portable-сборка Zen Browser), но это обычный chrome-level JS Firefox — работает
+на любой установке Firefox/Zen, portable или обычной.
+
+💬 Discord: **[discord.gg/eCQYpRx8Wv](https://discord.gg/eCQYpRx8Wv)**
+
+---
+
+## Почему не просто приватное окно?
+
+Настоящий Private Browsing в Firefox сделан на уровне движка и работает
+честно, но некоторые Firefox-based браузеры (например, Waterfox) выдают за
+«приватную вкладку» обычный контейнер, переиспользуемый для всех «приватных»
+вкладок разом — а значит, все они делят между собой куки и хранилище
+([BrowserWorks/waterfox#3956](https://github.com/BrowserWorks/waterfox/issues/3956)).
+Приватность есть только от обычных вкладок, но не друг от друга.
+
+Этот мод сделан правильно: **у каждой приватной вкладки — свой одноразовый
+контейнер** (contextual identity), который создаётся заново и уничтожается —
+вместе с куками, хранилищем, кэшем — в момент закрытия вкладки. Никакого
+пересечения между вкладками, никаких остатков данных.
+
+## Что он делает
+
+- Перехватывает `window.OpenBrowserWindow({private: true})` — единую точку
+  входа, через которую Firefox/Zen открывают приватное окно (пункт меню,
+  `Ctrl+Shift+P`, всё остальное) — и вместо окна открывает вкладку в текущем.
+- Каждая вкладка получает новый контейнер (`ContextualIdentityService.create`).
+- При закрытии вкладки контейнер удаляется — это стирает его куки,
+  localStorage, IndexedDB и кэш как часть удаления.
+- При старте браузера подчищаются осиротевшие контейнеры, оставшиеся от
+  сбоя/принудительного закрытия до того, как вкладка успела закрыться штатно.
+
+**Известное ограничение:** расширения в этих вкладках не отключаются (в
+отличие от настоящего приватного окна, где они выключены по умолчанию).
+Если у вас стоит расширение, которое трекает между вкладками — оно всё ещё
+видит вас здесь.
+
+## Установка
+
+Нужен privileged chrome-скриптинг в духе
+[fx-autoconfig](https://github.com/MrOtherGuy/fx-autoconfig) — он уже
+вшит в мод, отдельно ставить fx-autoconfig не нужно.
+
+1. Скачайте последний zip из [Releases](../../releases/latest).
+2. **Полностью закройте браузер.**
+3. Распакуйте куда угодно и выполните:
+
+   ```powershell
+   # Nullshade Portable
+   .\scripts\install.ps1 -BrowserRoot "X:\путь\к\ZenBrowserPortable"
+
+   # любая другая установка Firefox/Zen
+   .\scripts\install.ps1 -AppDir "C:\Program Files\Zen Browser" -ProfileDir "$env:APPDATA\zen\Profiles\xxxxxxxx.default"
+   ```
+
+   (Путь к профилю можно узнать через `about:support` → *Папка профиля*.)
+4. Запустите браузер. Нажмите `Ctrl+Shift+P` (или пункт меню про приватное
+   окно) — должна открыться вкладка, а не окно.
+
+Больше ничего ставить не нужно — скрипт просто копирует файлы в две папки.
+Чтобы удалить: сотрите `chrome\JS\private-tab.uc.mjs` и `chrome\utils\` из
+профиля, и `config.js` + `defaults\pref\config-prefs.js` +
+`defaults\pref\private-tab-mod.js` из папки установки браузера.
+
+## Что и куда ставится
+
+```text
+payload/
+├─ app-overlay/                    → в папку установки браузера (напр. App\Zen\)
+│  ├─ config.js                    bootstrap fx-autoconfig
+│  └─ defaults/pref/
+│     ├─ config-prefs.js           prefs fx-autoconfig
+│     └─ private-tab-mod.js        userChromeJS.enabled = true
+└─ profile-overlay/chrome/         → в папку профиля chrome\
+   ├─ JS/private-tab.uc.mjs        сам мод
+   └─ utils/                       загрузчик fx-autoconfig (вендор, MPL-2.0)
+```
+
+## Собрать релиз-zip самому
+
+```powershell
+Compress-Archive -Path .\payload\*, .\scripts, .\mod.json -DestinationPath output\NullshadePrivateTab.zip
+```
+
+(CI делает это автоматически при пуше в `payload/**` или `mod.json` —
+см. `.github/workflows/build-mod.yml`.)
+
+## Благодарности и лицензия
+
+- Использует [fx-autoconfig](https://github.com/MrOtherGuy/fx-autoconfig)
+  авторства MrOtherGuy (MPL-2.0) — вендорится в
+  `payload/profile-overlay/chrome/utils/`, полный текст лицензии в
+  `licenses/fx-autoconfig-LICENSE.txt`.
+- Этот репозиторий лицензирован под MPL-2.0 — см. `LICENSE`.
