@@ -70,6 +70,22 @@ between tabs, no leftover data.
   independent of the page load) — the tab keeps listening for a couple
   seconds after it closes to catch anything still in flight at that
   moment.
+- Form autofill values (search boxes, any named `<input>` you type into)
+  are cleaned up too. This is a separate database from history
+  (`formhistory.sqlite`) with no concept of containers at all — Firefox
+  stores it the same way regardless of which tab or container you typed
+  into, so this needed its own tracking and cleanup independent of the
+  container.
+- If a private tab opens another tab that shares its container ("Open
+  Link in New Tab", "Duplicate Tab"), the container and its cookies stay
+  alive until *every* tab using it is closed — closing just one no longer
+  kills the session for the others still open on it.
+- Dragging a private tab into its own new window is safe: everything it
+  visited up to that point is cleaned up immediately, and the new window
+  picks up tracking it from there. Dragging it into an *already open*
+  second window isn't retroactively tracked until that window is next
+  restarted — an uncommon enough action that this is a documented gap
+  rather than a fully engineered fix.
 
 ## Install
 

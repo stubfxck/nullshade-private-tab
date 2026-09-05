@@ -58,10 +58,13 @@ function breadcrumb(text) {
     const { PlacesUtils } = ChromeUtils.importESModule(
       "resource://gre/modules/PlacesUtils.sys.mjs"
     );
+    const { FormHistory } = ChromeUtils.importESModule(
+      "resource://gre/modules/FormHistory.sys.mjs"
+    );
     const { startupFinished } = ChromeUtils.importESModule(
       "chrome://userchromejs/content/utils.sys.mjs"
     );
-    await breadcrumb("imports OK (ContextualIdentityService, startupFinished)");
+    await breadcrumb("imports OK (ContextualIdentityService, FormHistory, startupFinished)");
 
     // Локализация: если язык интерфейса браузера русский — RU-строки,
     // иначе английский. Комментарии/breadcrumb-лог намеренно не переводим —
@@ -75,18 +78,31 @@ function breadcrumb(text) {
     const TAB_ICON = "chrome://global/skin/icons/indicator-private-browsing.svg";
     const TOAST_TEXT = t("Открыта новая приватная вкладка", "New private tab opened");
 
-    // userContextId наших вкладок — чтобы не спутать с обычными контейнерами
-    // пользователя (Personal/Work/Banking и т.д.) при уборке.
+    // userContextId наших контейнеров — чтобы не спутать с обычными
+    // контейнерами пользователя (Personal/Work/Banking и т.д.) при уборке.
     const shadowContexts = new Set();
 
+    // Сколько СЕЙЧАС ОТКРЫТЫХ вкладок используют данный контейнер. Нужно
+    // потому что одним нашим контейнером могут пользоваться НЕСКОЛЬКО вкладок
+    // одновременно — не только та, что открыл сам мод, но и любая, которую
+    // породила уже открытая приватная вкладка: "Open Link in New Tab"
+    // (Firefox открывает такую ссылку в ТОМ ЖЕ контейнере, что и родительская
+    // вкладка) или "Duplicate Tab". Раньше при закрытии ЛЮБОЙ из них контейнер
+    // сносился немедленно — если открыты две вкладки на одном контейнере и
+    // закрыть только одну, вторая вживую теряла куки/сессию у себя под носом.
+    // Теперь ContextualIdentityService.remove() вызывается только когда счётчик
+    // дошёл до нуля, т.е. закрылась ПОСЛЕДНЯЯ вкладка на этом контейнере.
+    const contextRefCounts = new Map(); // userContextId -> открытых вкладок
+
     // Какая из наших вкладок была активна последней и когда — нужно, чтобы
-    // правильно приписать page-visited событие, если оно прилетело чуть позже
-    // (асинхронно), чем сама вкладка перестала быть выбранной (см. ниже).
-    // ВАЖНО ограничивать это окном по времени (ATTRIBUTION_GRACE_MS), а не
-    // держать привязку бессрочно, пока вкладка не закрыта — иначе, если
-    // пользователь переключится в обычную вкладку и долго там сидит, вся её
-    // история будет ошибочно приписываться ещё не закрытой приватной вкладке
-    // и удалится вместе с ней.
+    // правильно приписать page-visited/formhistory-add событие, если оно
+    // прилетело чуть позже (асинхронно), чем сама вкладка перестала быть
+    // выбранной (см. resolveActivePrivateTab ниже). ВАЖНО ограничивать это
+    // окном по времени (ATTRIBUTION_GRACE_MS), а не держать привязку
+    // бессрочно, пока вкладка не закрыта — иначе, если пользователь
+    // переключится в обычную вкладку и долго там сидит, вся её история будет
+    // ошибочно приписываться ещё не закрытой приватной вкладке и удалится
+    // вместе с ней.
     let lastFocusedPrivateTab = null;
     let lastFocusedPrivateTabTime = 0;
     const ATTRIBUTION_GRACE_MS = 2500;
@@ -115,16 +131,54 @@ function breadcrumb(text) {
     // Починено подпиской на PlacesObservers "page-visited" — это единая точка,
     // через которую ЛЮБАЯ запись попадает в moz_places, независимо от того,
     // какой именно внутренний путь её туда положил (webProgress вкладки,
-    // urlbar напрямую, replaceState со страницы). Слушатель глобальный
-    // (на всё окно), поэтому фильтруется по gBrowser.selectedTab — событие
-    // учитывается, только если прямо сейчас активна одна из наших приватных
-    // вкладок. Источник подтверждён вживую: тем же способом (PlacesObservers.
-    // addListener(["page-visited"], ...)) пользуется сам browser/components/
-    // urlbar/UrlbarUtils.sys.mjs в исходниках Firefox.
-    const tabHistory = new Map(); // tab -> {listener, urls: Set<url>}
+    // urlbar напрямую, replaceState со страницы). Тем же способом
+    // (PlacesObservers.addListener(["page-visited"], ...)) пользуется сам
+    // browser/components/urlbar/UrlbarUtils.sys.mjs в исходниках Firefox.
+    //
+    // ВТОРОЙ, ОТДЕЛЬНЫЙ ИСТОЧНИК УТЕЧКИ: formhistory.sqlite (автозаполнение
+    // текстовых полей форм — не только урлбар, любое <input> с сохранением
+    // истории, включая поисковую панель самого браузера). Эта база НЕ имеет
+    // отношения к Places и, что важнее, в её схеме вообще нет колонки
+    // userContextId/originAttributes — она не привязана к контейнеру НИКАК,
+    // проверено напрямую по содержимому файла. Значит контейнер сам по себе
+    // тут не спасает вообще, чистить нужно всегда руками. Ловится через
+    // Services.obs topic "satchel-storage-changed" с data="formhistory-add"
+    // (проверено по исходнику toolkit/components/satchel/FormHistory.sys.mjs) —
+    // ловим только "add" (новая запись), не "update"/"bump": bump означает,
+    // что переиспользовалось уже СУЩЕСТВОВАВШЕЕ до открытия приватной вкладки
+    // значение, и его удаление снесло бы кусок обычной, не связанной с этой
+    // сессией истории автозаполнения.
+    const tabHistory = new Map(); // tab -> {listener, urls: Set<url>, formGuids: Set<guid>}
+
+    // Считает переданный userContextId "нашим" — то есть контейнером,
+    // созданным этим модом (а не обычным контейнером пользователя), даже
+    // если для ЭТОГО конкретного window-инстанса скрипта он ещё не в
+    // shadowContexts (например, вкладка только что появилась из другого
+    // окна). Смотрим на сам объект контейнера в ContextualIdentityService —
+    // имя/иконка/цвет однозначно наши, ничто другое их создать не могло.
+    function isOurIdentity(userContextId) {
+      if (!userContextId) {
+        return false;
+      }
+      if (shadowContexts.has(userContextId)) {
+        return true;
+      }
+      try {
+        const identity = ContextualIdentityService.getPublicIdentityFromId(userContextId);
+        return !!(
+          identity &&
+          identity.name === IDENTITY_NAME &&
+          identity.icon === IDENTITY_ICON &&
+          identity.color === IDENTITY_COLOR
+        );
+      } catch (ex) {
+        return false;
+      }
+    }
 
     function trackTabHistory(tab) {
       const urls = new Set();
+      const formGuids = new Set();
       const listener = {
         QueryInterface: ChromeUtils.generateQI([
           "nsIWebProgressListener",
@@ -144,31 +198,60 @@ function breadcrumb(text) {
       } catch (ex) {
         breadcrumb("trackTabHistory failed to attach listener: " + ex);
       }
-      tabHistory.set(tab, { listener, urls });
+      tabHistory.set(tab, { listener, urls, formGuids });
+    }
+
+    // Общая точка входа для ЛЮБОЙ вкладки, использующей наш контейнер:
+    // - открытая самим модом (openPrivateTab, через TabOpen);
+    // - "Open Link in New Tab" / "Duplicate Tab" из уже открытой приватной
+    //   вкладки — Firefox сам создаёт их в том же userContextId;
+    // - вкладка, перетащенная из другого окна в это (см. cleanupContextForTab
+    //   и reconcileAtStartup ниже) — здесь она попадает под учёт заново.
+    // Не трогает уже отслеживаемые вкладки (idempotent).
+    function reconcileTab(tab) {
+      const userContextId = tab.userContextId;
+      if (tabHistory.has(tab) || !isOurIdentity(userContextId)) {
+        return;
+      }
+      shadowContexts.add(userContextId);
+      trackTabHistory(tab);
+      contextRefCounts.set(userContextId, (contextRefCounts.get(userContextId) || 0) + 1);
+      breadcrumb(
+        "reconcileTab: now tracking tab for userContextId=" + userContextId +
+        ", refcount=" + contextRefCounts.get(userContextId)
+      );
+    }
+
+    // См. комментарии выше про lastFocusedPrivateTab/ATTRIBUTION_GRACE_MS —
+    // общая логика "к какой из наших вкладок отнести это глобальное событие"
+    // для обоих слушателей (Places и FormHistory).
+    function resolveActivePrivateTab() {
+      try {
+        const selected = gBrowser.selectedTab;
+        if (selected && tabHistory.has(selected)) {
+          return selected;
+        }
+      } catch (ex) {
+        // gBrowser недоступен в моменте — редкий момент закрытия окна целиком
+      }
+      if (
+        lastFocusedPrivateTab &&
+        tabHistory.has(lastFocusedPrivateTab) &&
+        Date.now() - lastFocusedPrivateTabTime < ATTRIBUTION_GRACE_MS
+      ) {
+        // Приватная вкладка уже не в фокусе (например, только что закрылась),
+        // но событие могло быть инициировано ещё до этого — короткое окно
+        // прощения по времени, не бессрочная привязка.
+        return lastFocusedPrivateTab;
+      }
+      return null;
     }
 
     // Единый на всё окно слушатель Places — ловит в том числе visit'ы,
     // записанные urlbar'ом напрямую (см. комментарий выше). Живёт всю сессию,
     // отдельно снимать его не нужно (как и патч OpenBrowserWindow).
     const globalVisitListener = (events) => {
-      let targetTab = null;
-      try {
-        const selected = gBrowser.selectedTab;
-        if (selected && shadowContexts.has(selected.userContextId)) {
-          targetTab = selected;
-        } else if (
-          lastFocusedPrivateTab &&
-          tabHistory.has(lastFocusedPrivateTab) &&
-          Date.now() - lastFocusedPrivateTabTime < ATTRIBUTION_GRACE_MS
-        ) {
-          // Приватная вкладка уже не в фокусе (например, только что закрылась),
-          // но событие могло быть инициировано ещё до этого — короткое окно
-          // прощения по времени, не бессрочная привязка.
-          targetTab = lastFocusedPrivateTab;
-        }
-      } catch (ex) {
-        return;
-      }
+      const targetTab = resolveActivePrivateTab();
       if (!targetTab) {
         return;
       }
@@ -189,6 +272,39 @@ function breadcrumb(text) {
       breadcrumb("failed to attach global PlacesObservers listener: " + ex);
     }
 
+    // Аналог globalVisitListener, но для formhistory.sqlite (см. комментарий
+    // про второй источник утечки выше). "formhistory-add" — единственный
+    // interesting случай: значение появилось в базе впервые.
+    const formHistoryObserver = {
+      QueryInterface: ChromeUtils.generateQI(["nsIObserver"]),
+      observe(subject, topic, data) {
+        if (topic !== "satchel-storage-changed" || data !== "formhistory-add") {
+          return;
+        }
+        const targetTab = resolveActivePrivateTab();
+        if (!targetTab) {
+          return;
+        }
+        const entry = tabHistory.get(targetTab);
+        if (!entry) {
+          return;
+        }
+        let guid;
+        try {
+          guid = subject.QueryInterface(Ci.nsISupportsString).data;
+        } catch (ex) {
+          return;
+        }
+        entry.formGuids.add(guid);
+        breadcrumb("global formhistory-add captured for active private tab, guid=" + guid);
+      },
+    };
+    try {
+      Services.obs.addObserver(formHistoryObserver, "satchel-storage-changed");
+    } catch (ex) {
+      breadcrumb("failed to attach FormHistory observer: " + ex);
+    }
+
     async function purgeTabHistory(tab) {
       const entry = tabHistory.get(tab);
       if (!entry) {
@@ -200,28 +316,40 @@ function breadcrumb(text) {
       } catch (ex) {
         // вкладка уже закрыта/browser уничтожен — не страшно
       }
-      // Небольшая пауза перед финальным сбором: page-visited может прилететь
-      // с небольшой асинхронной задержкой относительно самого действия
-      // (например, urlbar успевает записать typed-visit чуть позже TabClose,
-      // если пользователь закрыл вкладку сразу после ввода). Запись в
-      // tabHistory НАРОЧНО не удаляется до конца этой паузы — globalVisitListener
-      // должен иметь возможность найти entry и дописать в неё запоздавший url.
+      // Небольшая пауза перед финальным сбором: page-visited/formhistory-add
+      // может прилететь с небольшой асинхронной задержкой относительно самого
+      // действия (например, urlbar успевает записать typed-visit чуть позже
+      // TabClose, если пользователь закрыл вкладку сразу после ввода). Запись
+      // в tabHistory НАРОЧНО не удаляется до конца этой паузы — глобальные
+      // слушатели должны иметь возможность найти entry и дописать в неё
+      // запоздавшее значение.
       await new Promise((resolve) => setTimeout(resolve, ATTRIBUTION_GRACE_MS));
       tabHistory.delete(tab);
       const urls = [...entry.urls];
-      breadcrumb("purgeTabHistory: tracked " + urls.length + " url(s): " + JSON.stringify(urls));
-      if (urls.length === 0) {
-        return;
+      const formGuids = [...entry.formGuids];
+      breadcrumb(
+        "purgeTabHistory: tracked " + urls.length + " url(s), " +
+        formGuids.length + " form-history entr" + (formGuids.length === 1 ? "y" : "ies") +
+        ": " + JSON.stringify(urls)
+      );
+      if (urls.length > 0) {
+        try {
+          // Убирает эти адреса из истории посещений — вместе с ними чистятся
+          // и связанные записи истории ввода (откуда берутся подсказки поиска
+          // по этому адресу в адресной строке), т.к. они хранятся по ссылке
+          // на конкретную запись в moz_places.
+          await PlacesUtils.history.remove(urls);
+          breadcrumb("purgeTabHistory: PlacesUtils.history.remove() completed OK");
+        } catch (ex) {
+          breadcrumb("purgeTabHistory: PlacesUtils.history.remove() failed: " + ex);
+        }
       }
-      try {
-        // Убирает эти адреса из истории посещений — вместе с ними чистятся
-        // и связанные записи истории ввода (откуда берутся подсказки поиска
-        // по этому адресу в адресной строке), т.к. они хранятся по ссылке
-        // на конкретную запись в moz_places.
-        await PlacesUtils.history.remove(urls);
-        breadcrumb("purgeTabHistory: PlacesUtils.history.remove() completed OK");
-      } catch (ex) {
-        breadcrumb("purgeTabHistory failed: " + ex);
+      for (const guid of formGuids) {
+        try {
+          await FormHistory.update({ op: "remove", guid });
+        } catch (ex) {
+          breadcrumb("purgeTabHistory: FormHistory.update(remove) failed for " + guid + ": " + ex);
+        }
       }
     }
 
@@ -273,8 +401,10 @@ function breadcrumb(text) {
         IDENTITY_ICON,
         IDENTITY_COLOR
       );
-      shadowContexts.add(identity.userContextId);
-
+      // Сама постановка на учёт (shadowContexts/trackTabHistory/refcount)
+      // происходит в reconcileTab через слушатель TabOpen ниже — addTab
+      // диспатчит TabOpen синхронно, так что к моменту, когда мы вызовем
+      // gBrowser.selectedTab ниже, вкладка уже отслеживается.
       const tab = gBrowser.addTab("about:blank", {
         userContextId: identity.userContextId,
         triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
@@ -284,20 +414,56 @@ function breadcrumb(text) {
       } catch (ex) {
         // не критично, цветовая полоска контейнера всё равно видна
       }
-      trackTabHistory(tab);
       gBrowser.selectedTab = tab;
       showPrivateTabToast();
       return tab;
     }
 
-    async function cleanupContextForTab(tab) {
+    // adoptedBy приходит из event.detail для TabClose, которое Firefox
+    // диспатчит и когда вкладку по-настоящему закрывают, И когда её
+    // перетаскивают в другое окно (тут её содержимое переживает событие,
+    // просто переезжает). Раньше это не различалось: перетаскивание приватной
+    // вкладки в новое окно мгновенно сносило её контейнер и куки, пока
+    // вкладка ещё жива и видна пользователю в другом окне — проверено по
+    // Bugzilla 491431, где именно под это добавили detail.adoptedBy.
+    //
+    // При переезде чистим только то, что вкладка успела насобирать К ЭТОМУ
+    // моменту (историю/formhistory) — это безопасно и не зависит от того, где
+    // вкладка окажется дальше — но НЕ трогаем сам контейнер: он мог быть
+    // общим с другой ещё открытой вкладкой (см. contextRefCounts), а если и
+    // нет — за него отвечает reconcileAtStartup нового окна, куда вкладка
+    // переехала (см. ниже), когда там всё-таки закроется по-настоящему.
+    async function cleanupContextForTab(tab, adoptedBy) {
       const userContextId = tab.userContextId;
-      breadcrumb("TabClose fired, userContextId=" + userContextId + ", tracked=" + shadowContexts.has(userContextId));
-      if (!userContextId || !shadowContexts.has(userContextId)) {
+      if (adoptedBy) {
+        breadcrumb(
+          "TabClose (adopted by another window, not a real close) userContextId=" + userContextId
+        );
+        if (tabHistory.has(tab)) {
+          await purgeTabHistory(tab);
+        }
         return;
       }
-      shadowContexts.delete(userContextId);
+      breadcrumb("TabClose fired, userContextId=" + userContextId + ", tracked=" + tabHistory.has(tab));
+      if (!userContextId || !tabHistory.has(tab)) {
+        return;
+      }
       await purgeTabHistory(tab);
+      const remaining = (contextRefCounts.get(userContextId) || 1) - 1;
+      if (remaining > 0) {
+        // Контейнер всё ещё используется другой открытой вкладкой (например,
+        // ссылка была открыта из этой же приватной вкладки в новой) — куки и
+        // сессию убивать рано, иначе она мгновенно разлогинится/потеряет
+        // данные прямо во время использования.
+        contextRefCounts.set(userContextId, remaining);
+        breadcrumb(
+          "userContextId=" + userContextId + " still has " + remaining +
+          " open sibling tab(s) — keeping the container alive"
+        );
+        return;
+      }
+      contextRefCounts.delete(userContextId);
+      shadowContexts.delete(userContextId);
       try {
         // remove() сам вызывает Services.clearData.deleteDataFromOriginAttributesPattern
         // для этого userContextId — отдельно чистить куки/storage не нужно.
@@ -307,21 +473,32 @@ function breadcrumb(text) {
       }
     }
 
-    function purgeOrphanedContexts() {
-      // Если браузер закрыли принудительно (сбой, force-quit) до TabClose,
-      // контейнер от прошлой сессии остаётся с данными внутри. Распознаём
-      // такие по имени/иконке/цвету — их не могло создать ничего, кроме нас —
-      // и подчищаем при старте.
+    // Проходит по ВСЕМ вкладкам этого окна (вызывается один раз при старте) и
+    // берёт под учёт (reconcileTab) любую, что использует наш контейнер, но
+    // ещё не отслеживается — это одновременно чинит два случая:
+    //  1) вкладку перетащили в НОВОЕ окно (оно создаётся с нуля и запускает
+    //     этот скрипт впервые, уже с вкладкой внутри) — она подхватывается
+    //     тут вместо того, чтобы остаться вообще без присмотра;
+    //  2) браузер закрыли принудительно (сбой, force-quit) до TabClose —
+    //     контейнер от прошлой сессии остался без единой живой вкладки.
+    // Личности, у которых после прохода по вкладкам refcount так и не
+    // появился — это ровно случай (2), их можно спокойно удалять.
+    function reconcileAtStartup() {
+      for (const tab of gBrowser.tabs) {
+        reconcileTab(tab);
+      }
       for (const identity of ContextualIdentityService.getPublicIdentities()) {
         if (
           identity.name === IDENTITY_NAME &&
           identity.icon === IDENTITY_ICON &&
-          identity.color === IDENTITY_COLOR
+          identity.color === IDENTITY_COLOR &&
+          !contextRefCounts.has(identity.userContextId)
         ) {
           try {
             ContextualIdentityService.remove(identity.userContextId);
+            breadcrumb("reconcileAtStartup: removed orphaned identity userContextId=" + identity.userContextId);
           } catch (ex) {
-            breadcrumb("purgeOrphanedContexts failed: " + ex);
+            breadcrumb("reconcileAtStartup: failed to remove orphan: " + ex);
           }
         }
       }
@@ -345,7 +522,7 @@ function breadcrumb(text) {
     await waitForGBrowser();
     await breadcrumb("gBrowser ready");
 
-    purgeOrphanedContexts();
+    reconcileAtStartup();
 
     const originalOpenBrowserWindow = window.OpenBrowserWindow;
     window.OpenBrowserWindow = function (options) {
@@ -357,16 +534,24 @@ function breadcrumb(text) {
       return originalOpenBrowserWindow.apply(this, arguments);
     };
 
+    // Берёт под учёт вкладки, которые появляются НЕ через openPrivateTab(), но
+    // всё равно используют наш контейнер: "Open Link in New Tab"/"Duplicate
+    // Tab" из уже открытой приватной вкладки, или вкладка, только что
+    // перетащенная в это окно из другого (см. cleanupContextForTab выше).
+    gBrowser.tabContainer.addEventListener("TabOpen", (event) => {
+      reconcileTab(event.target);
+    });
+
     gBrowser.tabContainer.addEventListener("TabClose", (event) => {
-      cleanupContextForTab(event.target);
+      cleanupContextForTab(event.target, event.detail && event.detail.adoptedBy);
     });
 
     // Обновляет lastFocusedPrivateTab, когда одна из наших вкладок становится
-    // активной — используется globalVisitListener'ом, чтобы правильно
-    // приписать чуть запоздавшее page-visited событие (см. комментарий выше).
+    // активной — используется resolveActivePrivateTab(), чтобы правильно
+    // приписать чуть запоздавшее page-visited/formhistory-add событие.
     gBrowser.tabContainer.addEventListener("TabSelect", (event) => {
       const tab = event.target;
-      if (tab && shadowContexts.has(tab.userContextId)) {
+      if (tab && tabHistory.has(tab)) {
         lastFocusedPrivateTab = tab;
         lastFocusedPrivateTabTime = Date.now();
       }
