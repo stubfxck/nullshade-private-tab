@@ -305,6 +305,30 @@ function breadcrumb(text) {
       breadcrumb("failed to attach FormHistory observer: " + ex);
     }
 
+    // Общий воркер удаления — вызывается дважды из purgeTabHistory (немедленно
+    // и повторно после паузы), поэтому вынесен отдельно.
+    async function purgeCollected(urls, formGuids) {
+      if (urls.length > 0) {
+        try {
+          // Убирает эти адреса из истории посещений — вместе с ними чистятся
+          // и связанные записи истории ввода (откуда берутся подсказки поиска
+          // по этому адресу в адресной строке), т.к. они хранятся по ссылке
+          // на конкретную запись в moz_places.
+          await PlacesUtils.history.remove(urls);
+          breadcrumb("purgeCollected: PlacesUtils.history.remove() OK for " + urls.length + " url(s)");
+        } catch (ex) {
+          breadcrumb("purgeCollected: PlacesUtils.history.remove() failed: " + ex);
+        }
+      }
+      for (const guid of formGuids) {
+        try {
+          await FormHistory.update({ op: "remove", guid });
+        } catch (ex) {
+          breadcrumb("purgeCollected: FormHistory.update(remove) failed for " + guid + ": " + ex);
+        }
+      }
+    }
+
     async function purgeTabHistory(tab) {
       const entry = tabHistory.get(tab);
       if (!entry) {
@@ -316,40 +340,40 @@ function breadcrumb(text) {
       } catch (ex) {
         // вкладка уже закрыта/browser уничтожен — не страшно
       }
-      // Небольшая пауза перед финальным сбором: page-visited/formhistory-add
-      // может прилететь с небольшой асинхронной задержкой относительно самого
-      // действия (например, urlbar успевает записать typed-visit чуть позже
-      // TabClose, если пользователь закрыл вкладку сразу после ввода). Запись
-      // в tabHistory НАРОЧНО не удаляется до конца этой паузы — глобальные
-      // слушатели должны иметь возможность найти entry и дописать в неё
-      // запоздавшее значение.
+
+      // ФАЗА 1 — чистим немедленно всё, что уже накопилось к моменту закрытия.
+      // На практике почти все visit'ы (обычная навигация, urlbar-поиск,
+      // formhistory-add) успевают прилететь через глобальные слушатели ЕЩЁ
+      // ПОКА вкладка открыта — за секунды до TabClose, а не после него.
+      // Раньше вся чистка целиком откладывалась на ATTRIBUTION_GRACE_MS вперёд
+      // без всякой нужды, и всё это время адрес продолжал всплывать в
+      // подсказках урлбара — ровно это и увидел пользователь при проверке
+      // "закрыл вкладку и сразу начал печатать в адресную строку".
+      const firstPassUrls = [...entry.urls];
+      const firstPassGuids = [...entry.formGuids];
+      breadcrumb(
+        "purgeTabHistory: immediate pass, " + firstPassUrls.length + " url(s), " +
+        firstPassGuids.length + " form entr" + (firstPassGuids.length === 1 ? "y" : "ies") +
+        ": " + JSON.stringify(firstPassUrls)
+      );
+      await purgeCollected(firstPassUrls, firstPassGuids);
+
+      // ФАЗА 2 — запись в tabHistory нарочно не удаляется ещё ATTRIBUTION_GRACE_MS:
+      // держим её живой на случай, если что-то (тот самый urlbar-typed visit)
+      // всё же придёт с задержкой уже после закрытия. Добираем только НОВОЕ,
+      // появившееся после первого прохода — то, что уже почистили, второй раз
+      // не трогаем.
       await new Promise((resolve) => setTimeout(resolve, ATTRIBUTION_GRACE_MS));
       tabHistory.delete(tab);
-      const urls = [...entry.urls];
-      const formGuids = [...entry.formGuids];
-      breadcrumb(
-        "purgeTabHistory: tracked " + urls.length + " url(s), " +
-        formGuids.length + " form-history entr" + (formGuids.length === 1 ? "y" : "ies") +
-        ": " + JSON.stringify(urls)
-      );
-      if (urls.length > 0) {
-        try {
-          // Убирает эти адреса из истории посещений — вместе с ними чистятся
-          // и связанные записи истории ввода (откуда берутся подсказки поиска
-          // по этому адресу в адресной строке), т.к. они хранятся по ссылке
-          // на конкретную запись в moz_places.
-          await PlacesUtils.history.remove(urls);
-          breadcrumb("purgeTabHistory: PlacesUtils.history.remove() completed OK");
-        } catch (ex) {
-          breadcrumb("purgeTabHistory: PlacesUtils.history.remove() failed: " + ex);
-        }
-      }
-      for (const guid of formGuids) {
-        try {
-          await FormHistory.update({ op: "remove", guid });
-        } catch (ex) {
-          breadcrumb("purgeTabHistory: FormHistory.update(remove) failed for " + guid + ": " + ex);
-        }
+      const secondPassUrls = [...entry.urls].filter((u) => !firstPassUrls.includes(u));
+      const secondPassGuids = [...entry.formGuids].filter((g) => !firstPassGuids.includes(g));
+      if (secondPassUrls.length > 0 || secondPassGuids.length > 0) {
+        breadcrumb(
+          "purgeTabHistory: follow-up pass, " + secondPassUrls.length + " new url(s), " +
+          secondPassGuids.length + " new form entr" + (secondPassGuids.length === 1 ? "y" : "ies") +
+          ": " + JSON.stringify(secondPassUrls)
+        );
+        await purgeCollected(secondPassUrls, secondPassGuids);
       }
     }
 

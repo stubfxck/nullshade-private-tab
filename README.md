@@ -67,9 +67,13 @@ between tabs, no leftover data.
   would affect your regular browsing, not just the private tab). This
   covers both real page navigations and text typed directly into the
   address bar (Firefox records that as a separate "typed" history entry,
-  independent of the page load) — the tab keeps listening for a couple
-  seconds after it closes to catch anything still in flight at that
-  moment.
+  independent of the page load). Cleanup happens in two passes: everything
+  already known at the moment the tab closes gets purged immediately, then
+  the tab keeps listening a couple more seconds to catch anything that was
+  still in flight (a typed search that hadn't finished recording yet) and
+  purges that too. Before this, cleanup only ran after that whole delay,
+  which meant closing a tab and immediately typing in the address bar could
+  briefly still show the old suggestion.
 - Form autofill values (search boxes, any named `<input>` you type into)
   are cleaned up too. This is a separate database from history
   (`formhistory.sqlite`) with no concept of containers at all — Firefox
